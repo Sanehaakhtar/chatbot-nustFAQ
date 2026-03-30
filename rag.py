@@ -1,12 +1,13 @@
 import json
 import difflib
 import sqlite3
+import time
 from pathlib import Path
 import re
-from typing import Dict, Generator, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, AsyncGenerator
 
 import hnswlib
-import requests
+import httpx
 
 
 # Configurable constants
@@ -26,13 +27,40 @@ MAX_CONTEXT_CHUNKS = 4
 MAX_CHUNK_CHARS = 700
 SIMILARITY_THRESHOLD = 0.35
 REQUEST_TIMEOUT_SECONDS = 240
+EMBED_TIMEOUT_SECONDS = 20
+GENERATE_TIMEOUT_SECONDS = 70
+SESSION_TTL_SECONDS = 1800
+MAX_SESSION_TURNS = 6
 REFUSAL_MESSAGE = "I can only help with NUST administration topics."
 FAQ_MATCH_THRESHOLD = 0.62
-FAQ_DIRECT_MATCH_THRESHOLD = 0.80
+FAQ_DIRECT_MATCH_THRESHOLD = 0.68
+FAQ_FALLBACK_THRESHOLD = 0.45
 GREETING_MESSAGE = (
     "Hello! I can help with NUST admissions, fees, test schedules, hostels, and student services. "
     "Try asking: 'What is the eligibility criteria for UG admissions?'"
 )
+
+FOLLOW_UP_HINTS = {
+    "how",
+    "how?",
+    "details",
+    "detail",
+    "process",
+    "steps",
+    "kab",
+    "when",
+    "kis",
+    "kaise",
+    "kese",
+    "kesy",
+    "more",
+    "explain",
+    "phir",
+    "uska",
+    "iska",
+    "that",
+    "this",
+}
 
 DOMAIN_TERMS = {
     "nust",
@@ -73,6 +101,7 @@ GREETING_TERMS = {
     "assalamualaikum",
     "start",
     "help",
+    "aoa",
 }
 
 STOPWORDS = {
@@ -133,6 +162,32 @@ TOKEN_ALIASES = {
     "kitna": "amount",
     "kaise": "how",
     "kese": "how",
+    "kesy": "how",
+    "kis": "which",
+    "konsi": "which",
+    "kon": "which",
+    "kitne": "howmany",
+    "kitnay": "howmany",
+    "zyada": "more",
+    "zada": "more",
+    "zyaada": "more",
+    "program": "programme",
+    "programs": "programme",
+    "programme": "programme",
+    "programmes": "programme",
+    "krskte": "can",
+    "kar": "do",
+    "sakte": "can",
+    "sakta": "can",
+    "sakti": "can",
+    "applykarsakte": "admission",
+    "form": "application",
+    "forms": "application",
+    "challan": "challan",
+    "dastavez": "document",
+    "kagzaat": "document",
+    "kaagzaat": "document",
+    "kab": "when",
     "karna": "process",
     "karen": "process",
     "krna": "process",
@@ -140,6 +195,26 @@ TOKEN_ALIASES = {
     "fees": "fee",
 }
 
+ROMAN_URDU_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bek\s+se\s+(zyada|zada|zyaada).*(program|programme|course).*(apply|admission)"), "Can I apply for more than one programme at NUST?"),
+    (re.compile(r"\b(registration|admission).*(document|dastavez|kagzaat)"), "What documents are required for NUST registration?"),
+    (re.compile(r"\bfee\s+challan.*(status|check|payment)"), "How can I check my fee challan and payment status?"),
+    (re.compile(r"\b(course|semester).*(registration).*(kab|when|open)"), "When does semester course registration open?"),
+    (re.compile(r"\b(eligibility|eligible|criteria).*(ug|undergraduate|admission)"), "What is the eligibility criteria for UG admissions?"),
+]
+
+# Global caches to avoid reloading index/db per request
+_INDEX_CACHE: Optional[hnswlib.Index] = None
+_INDEX_METADATA_COUNT: int = 0
+_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None:
+        _HTTP_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=GENERATE_TIMEOUT_SECONDS, write=10.0, pool=5.0)
+        )
+    return _HTTP_CLIENT
 
 def load_system_prompt() -> str:
     if SYSTEM_PROMPT_PATH.exists():
@@ -149,15 +224,6 @@ def load_system_prompt() -> str:
         "student services, and FAQs. If the question is unrelated, respond: "
         "'I can only help with NUST administration topics.'"
     )
-
-
-def is_ollama_available() -> bool:
-    try:
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=10)
-        response.raise_for_status()
-        return True
-    except requests.RequestException:
-        return False
 
 
 def has_domain_terms(question: str) -> bool:
@@ -190,6 +256,14 @@ def tokenize_query_terms(text: str) -> set[str]:
             normalized.add(token)
 
     return normalized
+
+
+def rewrite_roman_urdu_question(question: str) -> str:
+    normalized = " ".join(re.findall(r"[a-zA-Z0-9]+", question.lower()))
+    for pattern, replacement in ROMAN_URDU_PATTERNS:
+        if pattern.search(normalized):
+            return replacement
+    return question
 
 
 def rerank_chunks(question: str, chunks: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -244,12 +318,13 @@ def find_fast_faq_answer(question: str, chunks: List[Dict[str, str]]) -> Optiona
     return None
 
 
-def embed_text(text: str) -> List[float]:
+async def embed_text(text: str) -> List[float]:
     payload = {"model": EMBED_MODEL, "prompt": text}
-    response = requests.post(
+    client = get_http_client()
+    response = await client.post(
         f"{OLLAMA_BASE_URL}/api/embeddings",
         json=payload,
-        timeout=REQUEST_TIMEOUT_SECONDS,
+        timeout=httpx.Timeout(connect=5.0, read=EMBED_TIMEOUT_SECONDS, write=10.0, pool=5.0),
     )
     response.raise_for_status()
     data = response.json()
@@ -271,9 +346,16 @@ def total_chunks(conn: sqlite3.Connection) -> int:
 
 
 def load_index(embedding_dim: int, max_elements: int) -> hnswlib.Index:
+    global _INDEX_CACHE, _INDEX_METADATA_COUNT
+    if _INDEX_CACHE is not None and _INDEX_METADATA_COUNT == max_elements:
+        return _INDEX_CACHE
+    
     index = hnswlib.Index(space="cosine", dim=embedding_dim)
     index.load_index(str(INDEX_PATH), max_elements=max(10000, max_elements + 1000))
     index.set_ef(50)
+    
+    _INDEX_CACHE = index
+    _INDEX_METADATA_COUNT = max_elements
     return index
 
 
@@ -288,7 +370,7 @@ def fetch_chunk_by_id(conn: sqlite3.Connection, chunk_id: int) -> Optional[sqlit
     ).fetchone()
 
 
-def retrieve_context(question: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
+async def retrieve_context(question: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
     if not INDEX_PATH.exists() or not METADATA_DB_PATH.exists():
         return [], "Vector store is empty. Run ingestion first with ingest.py."
 
@@ -298,7 +380,7 @@ def retrieve_context(question: str) -> Tuple[List[Dict[str, str]], Optional[str]
         if count == 0:
             return [], "Vector store is empty. Run ingestion first with ingest.py."
 
-        query_embedding = embed_text(question)
+        query_embedding = await embed_text(question)
         index = load_index(len(query_embedding), count)
         k = min(TOP_K, count)
         labels, distances = index.knn_query([query_embedding], k=k)
@@ -326,7 +408,7 @@ def retrieve_context(question: str) -> Tuple[List[Dict[str, str]], Optional[str]
 
         ranked_chunks = rerank_chunks(question, chunks)
         return ranked_chunks[:MAX_CONTEXT_CHUNKS], None
-    except requests.RequestException:
+    except httpx.HTTPError:
         return [], "Could not reach Ollama. Start it with: ollama serve"
     except Exception as exc:
         return [], f"Retrieval failed: {exc}"
@@ -361,7 +443,7 @@ def build_user_prompt(question: str, context_block: str) -> str:
     )
 
 
-def stream_generate(prompt: str, system_prompt: str) -> Generator[str, None, None]:
+async def stream_generate(prompt: str, system_prompt: str) -> AsyncGenerator[str, None]:
     payload = {
         "model": CHAT_MODEL,
         "prompt": prompt,
@@ -374,14 +456,14 @@ def stream_generate(prompt: str, system_prompt: str) -> Generator[str, None, Non
         },
     }
 
-    with requests.post(
+    client = get_http_client()
+    async with client.stream(
+        "POST",
         f"{OLLAMA_BASE_URL}/api/generate",
         json=payload,
-        stream=True,
-        timeout=REQUEST_TIMEOUT_SECONDS,
     ) as response:
         response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
+        async for line in response.aiter_lines():
             if not line:
                 continue
             data = json.loads(line)
@@ -406,6 +488,154 @@ class NustRAG:
         self.system_prompt = load_system_prompt()
         self.faq_cache = self._load_faq_cache()
         self.faq_term_vocab = self._build_faq_term_vocab()
+        self.faq_exact_lookup = self._build_faq_exact_lookup()
+        self.answer_cache: Dict[str, Tuple[float, Dict[str, object]]] = {}
+        self.answer_cache_ttl_seconds = 300
+        self.sessions: Dict[str, Dict[str, object]] = {}
+        self.session_ttl_seconds = SESSION_TTL_SECONDS
+        self.max_session_turns = MAX_SESSION_TURNS
+        self.stats: Dict[str, int] = {
+            "total_requests": 0,
+            "cache_hits": 0,
+            "direct_hits": 0,
+            "fallback_hits": 0,
+            "blocked": 0,
+        }
+
+    def _prune_sessions(self) -> None:
+        now = time.time()
+        expired = [
+            sid
+            for sid, payload in self.sessions.items()
+            if (now - float(payload.get("updated_at", 0.0))) > self.session_ttl_seconds
+        ]
+        for sid in expired:
+            self.sessions.pop(sid, None)
+
+    def _get_or_create_session(self, session_id: Optional[str]) -> List[Dict[str, str]]:
+        if not session_id:
+            return []
+
+        self._prune_sessions()
+        now = time.time()
+        payload = self.sessions.get(session_id)
+        if payload is None:
+            payload = {"updated_at": now, "turns": []}
+            self.sessions[session_id] = payload
+        else:
+            payload["updated_at"] = now
+
+        turns = payload.get("turns")
+        if not isinstance(turns, list):
+            payload["turns"] = []
+            return payload["turns"]
+        return turns
+
+    def _record_turn(self, session_id: Optional[str], user_text: str, assistant_text: str) -> None:
+        if not session_id:
+            return
+        turns = self._get_or_create_session(session_id)
+
+        turns.append({"role": "user", "text": user_text.strip()})
+        turns.append({"role": "assistant", "text": assistant_text.strip()})
+
+        max_entries = self.max_session_turns * 2
+        if len(turns) > max_entries:
+            del turns[: len(turns) - max_entries]
+
+    def _is_follow_up(self, question: str) -> bool:
+        tokens = re.findall(r"[a-zA-Z0-9]+", question.lower())
+        if not tokens:
+            return False
+        if len(tokens) > 6:
+            return False
+        if tokens[0] in FOLLOW_UP_HINTS:
+            return True
+        return any(token in FOLLOW_UP_HINTS for token in tokens)
+
+    def _resolve_follow_up(self, question: str, session_id: Optional[str]) -> str:
+        turns = self._get_or_create_session(session_id)
+        if not turns or not self._is_follow_up(question):
+            return question
+
+        last_user = ""
+        for turn in reversed(turns):
+            if turn.get("role") == "user":
+                last_user = str(turn.get("text", "")).strip()
+                break
+
+        if not last_user:
+            return question
+
+        return f"{last_user}. {question}"
+
+    def _prune_answer_cache(self) -> None:
+        now = time.time()
+        expired = [
+            key
+            for key, (ts, _payload) in self.answer_cache.items()
+            if (now - ts) > self.answer_cache_ttl_seconds
+        ]
+        for key in expired:
+            self.answer_cache.pop(key, None)
+
+    def get_runtime_metrics(self) -> Dict[str, object]:
+        self._prune_sessions()
+        self._prune_answer_cache()
+
+        total_requests = self.stats["total_requests"]
+        handled = self.stats["direct_hits"] + self.stats["fallback_hits"]
+        success_rate = (handled / total_requests) if total_requests else 0.0
+        total_session_turns = sum(
+            len(payload.get("turns", []))
+            for payload in self.sessions.values()
+            if isinstance(payload.get("turns"), list)
+        )
+
+        return {
+            "faq_items": len(self.faq_cache),
+            "faq_terms": len(self.faq_term_vocab),
+            "requests": total_requests,
+            "cache_hits": self.stats["cache_hits"],
+            "direct_hits": self.stats["direct_hits"],
+            "fallback_hits": self.stats["fallback_hits"],
+            "blocked": self.stats["blocked"],
+            "success_rate": round(success_rate * 100.0, 1),
+            "active_sessions": len(self.sessions),
+            "active_turn_entries": total_session_turns,
+            "answer_cache_entries": len(self.answer_cache),
+        }
+
+    def _cache_key(self, question: str) -> str:
+        return " ".join(question.strip().lower().split())
+
+    def _normalize_question(self, question: str) -> str:
+        terms = sorted(tokenize_query_terms(question))
+        if not terms:
+            return self._cache_key(question)
+        return " ".join(terms)
+
+    def _build_faq_exact_lookup(self) -> Dict[str, Dict[str, str]]:
+        lookup: Dict[str, Dict[str, str]] = {}
+        for item in self.faq_cache:
+            lookup[self._cache_key(item["question"])] = item
+            lookup[self._normalize_question(item["question"])] = item
+        return lookup
+
+    def _get_cached_answer(self, question: str) -> Optional[Dict[str, object]]:
+        key = self._cache_key(question)
+        cached = self.answer_cache.get(key)
+        if not cached:
+            return None
+        ts, payload = cached
+        if (time.time() - ts) > self.answer_cache_ttl_seconds:
+            self.answer_cache.pop(key, None)
+            return None
+        return payload
+
+    def _set_cached_answer(self, question: str, payload: Dict[str, object]) -> None:
+        key = self._cache_key(question)
+        self.answer_cache[key] = (time.time(), payload)
 
     def _load_faq_cache(self) -> List[Dict[str, str]]:
         if not METADATA_DB_PATH.exists():
@@ -446,6 +676,9 @@ class NustRAG:
             vocab.update(tokenize_query_terms(item["question"]))
         return vocab
 
+    def _format_faq_source(self, item: Dict[str, str]) -> str:
+        return f"{item['title']} ({item['section']}) - {item['source']}"
+
     def _should_refuse_early(self, question: str) -> bool:
         query_terms = tokenize_query_terms(question)
         if not query_terms:
@@ -458,8 +691,25 @@ class NustRAG:
         if not self.faq_cache:
             return None
 
+        # Fast exact lookup on normalized and raw forms.
+        exact_item = self.faq_exact_lookup.get(self._cache_key(question))
+        if exact_item:
+            return exact_item["answer"], [self._format_faq_source(exact_item)]
+
+        normalized_item = self.faq_exact_lookup.get(self._normalize_question(question))
+        if normalized_item:
+            return normalized_item["answer"], [self._format_faq_source(normalized_item)]
+
         q_norm = question.strip().lower()
         query_terms = tokenize_query_terms(question)
+
+        # Deterministic fast path for high-frequency intent.
+        if {"document", "registration"}.issubset(query_terms):
+            for item in self.faq_cache:
+                faq_terms = tokenize_query_terms(item["question"])
+                if {"document", "registration"}.issubset(faq_terms):
+                    return item["answer"], [self._format_faq_source(item)]
+
         best_score = 0.0
         best_item: Optional[Dict[str, str]] = None
 
@@ -475,6 +725,14 @@ class NustRAG:
             if overlap_ratio >= 0.99 and ratio >= 0.45:
                 score += 0.05
 
+            # Favor practical paraphrases with strong term overlap.
+            if len(query_terms) >= 3 and overlap_ratio >= 0.60:
+                score += 0.12
+
+            # Strong boost for common registration-document intent.
+            if {"document", "registration"}.issubset(query_terms) and {"document", "registration"}.issubset(faq_terms):
+                score += 0.20
+
             # Handle short intent-style prompts like "can foreigner apply".
             if len(query_terms) <= 4 and overlap_ratio >= 0.66 and ratio >= 0.28:
                 score += 0.22
@@ -486,137 +744,151 @@ class NustRAG:
         if not best_item or best_score < FAQ_DIRECT_MATCH_THRESHOLD:
             return None
 
-        source = f"{best_item['title']} ({best_item['section']}) - {best_item['source']}"
-        return best_item["answer"], [source]
+        return best_item["answer"], [self._format_faq_source(best_item)]
 
-    def precheck(self, question: str) -> Optional[str]:
+    def _find_faq_fallback_answer(self, question: str) -> Optional[Tuple[str, List[str]]]:
+        if not self.faq_cache:
+            return None
+
+        q_norm = question.strip().lower()
+        query_terms = tokenize_query_terms(question)
+        best_score = 0.0
+        best_item: Optional[Dict[str, str]] = None
+
+        for item in self.faq_cache:
+            faq_q = item["question"].lower()
+            ratio = difflib.SequenceMatcher(None, q_norm, faq_q).ratio()
+            faq_terms = tokenize_query_terms(item["question"])
+            overlap = len(query_terms & faq_terms)
+            overlap_ratio = overlap / max(1, len(query_terms))
+
+            score = (0.30 * ratio) + (0.70 * overlap_ratio)
+            if overlap_ratio >= 0.5:
+                score += 0.08
+            if len(query_terms) <= 5 and overlap_ratio >= 0.4:
+                score += 0.08
+
+            if score > best_score:
+                best_score = score
+                best_item = item
+
+        if not best_item or best_score < FAQ_FALLBACK_THRESHOLD:
+            return None
+
+        return best_item["answer"], [self._format_faq_source(best_item)]
+
+    async def precheck(self, question: str) -> Optional[str]:
         if not question.strip():
             return "Please enter a question."
-        if not is_ollama_available():
-            return "Ollama is not running. Start it with: ollama serve"
         if is_greeting_or_help(question):
             return GREETING_MESSAGE
         return None
 
-    def answer(self, question: str) -> Dict[str, object]:
-        precheck_error = self.precheck(question)
+    async def answer(self, question: str, session_id: Optional[str] = None) -> Dict[str, object]:
+        self.stats["total_requests"] += 1
+        resolved_question = self._resolve_follow_up(question, session_id)
+        match_question = rewrite_roman_urdu_question(resolved_question)
+
+        cached = self._get_cached_answer(match_question)
+        if cached:
+            self.stats["cache_hits"] += 1
+            self._record_turn(session_id, question, str(cached.get("answer", "")))
+            return cached
+
+        precheck_error = await self.precheck(match_question)
         if precheck_error:
+            self.stats["blocked"] += 1
+            self._record_turn(session_id, question, precheck_error)
             return {
                 "answer": precheck_error,
                 "sources": [],
                 "status": "blocked",
             }
 
-        direct_faq = self._find_direct_faq_answer(question)
+        direct_faq = self._find_direct_faq_answer(match_question)
         if direct_faq:
             answer, sources = direct_faq
-            return {
+            self.stats["direct_hits"] += 1
+            payload = {
                 "answer": answer,
                 "sources": sources,
                 "status": "ok",
             }
+            self._set_cached_answer(match_question, payload)
+            self._record_turn(session_id, question, answer)
+            return payload
 
-        if self._should_refuse_early(question):
+        # FAQ-only fast path: use best FAQ fallback before any heavy retrieval/generation.
+        fallback_faq = self._find_faq_fallback_answer(match_question)
+        if fallback_faq:
+            answer, sources = fallback_faq
+            self.stats["fallback_hits"] += 1
+            payload = {
+                "answer": answer,
+                "sources": sources,
+                "status": "ok",
+            }
+            self._set_cached_answer(match_question, payload)
+            self._record_turn(session_id, question, answer)
+            return payload
+
+        if self._should_refuse_early(match_question):
+            self.stats["blocked"] += 1
+            self._record_turn(session_id, question, REFUSAL_MESSAGE)
             return {
                 "answer": REFUSAL_MESSAGE,
                 "sources": [],
                 "status": "blocked",
             }
 
-        chunks, retrieval_error = retrieve_context(question)
-        if retrieval_error:
-            return {
-                "answer": retrieval_error,
-                "sources": [],
-                "status": "error",
-            }
-
-        if not chunks:
-            return {
-                "answer": REFUSAL_MESSAGE,
-                "sources": [],
-                "status": "blocked",
-            }
-
-        fast_faq = find_fast_faq_answer(question, chunks)
-        if fast_faq:
-            answer, sources = fast_faq
-            return {
-                "answer": answer,
-                "sources": sources,
-                "status": "ok",
-            }
-
-        prompt = build_user_prompt(question, build_context_block(chunks))
-        try:
-            tokens = []
-            for token in stream_generate(prompt, self.system_prompt):
-                tokens.append(token)
-        except requests.RequestException:
-            return {
-                "answer": "Could not generate response. Check Ollama and model availability.",
-                "sources": [],
-                "status": "error",
-            }
-        except Exception as exc:
-            return {
-                "answer": f"Generation failed: {exc}",
-                "sources": [],
-                "status": "error",
-            }
-
+        self.stats["blocked"] += 1
+        fallback_message = "I could not find a close FAQ match. Please rephrase your question using FAQ terms."
+        self._record_turn(session_id, question, fallback_message)
         return {
-            "answer": "".join(tokens).strip() or REFUSAL_MESSAGE,
-            "sources": format_sources(chunks),
-            "status": "ok",
+            "answer": fallback_message,
+            "sources": [],
+            "status": "blocked",
         }
 
-    def stream_answer(self, question: str) -> Generator[str, None, None]:
-        precheck_error = self.precheck(question)
+    async def stream_answer(self, question: str, session_id: Optional[str] = None) -> AsyncGenerator[str, None]:
+        self.stats["total_requests"] += 1
+        resolved_question = self._resolve_follow_up(question, session_id)
+        match_question = rewrite_roman_urdu_question(resolved_question)
+
+        precheck_error = await self.precheck(match_question)
         if precheck_error:
+            self.stats["blocked"] += 1
+            self._record_turn(session_id, question, precheck_error)
             yield precheck_error
             return
 
-        direct_faq = self._find_direct_faq_answer(question)
+        direct_faq = self._find_direct_faq_answer(match_question)
         if direct_faq:
             answer, sources = direct_faq
+            self.stats["direct_hits"] += 1
+            self._record_turn(session_id, question, answer)
             yield answer
             if sources:
                 yield "\n\nSources:\n- " + "\n- ".join(sources)
             return
 
-        if self._should_refuse_early(question):
-            yield REFUSAL_MESSAGE
-            return
-
-        chunks, retrieval_error = retrieve_context(question)
-        if retrieval_error:
-            yield retrieval_error
-            return
-
-        if not chunks:
-            yield REFUSAL_MESSAGE
-            return
-
-        fast_faq = find_fast_faq_answer(question, chunks)
-        if fast_faq:
-            answer, sources = fast_faq
+        fallback_faq = self._find_faq_fallback_answer(match_question)
+        if fallback_faq:
+            answer, sources = fallback_faq
+            self.stats["fallback_hits"] += 1
+            self._record_turn(session_id, question, answer)
             yield answer
             if sources:
                 yield "\n\nSources:\n- " + "\n- ".join(sources)
             return
 
-        prompt = build_user_prompt(question, build_context_block(chunks))
-        try:
-            for token in stream_generate(prompt, self.system_prompt):
-                yield token
-        except requests.RequestException:
-            yield "Could not generate response. Check Ollama and model availability."
-            return
-        except Exception as exc:
-            yield f"Generation failed: {exc}"
+        if self._should_refuse_early(match_question):
+            self.stats["blocked"] += 1
+            self._record_turn(session_id, question, REFUSAL_MESSAGE)
+            yield REFUSAL_MESSAGE
             return
 
-        sources = format_sources(chunks)
-        if sources:
-            yield "\n\nSources:\n- " + "\n- ".join(sources)
+        self.stats["blocked"] += 1
+        fallback_message = "I could not find a close FAQ match. Please rephrase your question using FAQ terms."
+        self._record_turn(session_id, question, fallback_message)
+        yield fallback_message

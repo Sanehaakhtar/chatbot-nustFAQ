@@ -1,4 +1,5 @@
-from typing import Dict, Generator
+from typing import Dict, AsyncGenerator, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, Query, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -18,12 +19,14 @@ rag = NustRAG()
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[str]
     status: str
+    session_id: str
 
 
 def sse_event(data: str) -> str:
@@ -42,173 +45,71 @@ def favicon() -> Response:
     return Response(status_code=204)
 
 
+@app.get("/.well-known/appspecific/com.chrome.devtools.json")
+def chrome_devtools_probe() -> Response:
+    # Chrome probes this path automatically; return 204 to avoid noisy 404 logs.
+    return Response(status_code=204)
+
+
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest) -> Dict[str, object]:
-    return rag.answer(request.message)
+async def chat(request: ChatRequest) -> Dict[str, object]:
+    session_id = request.session_id or uuid4().hex
+    payload = await rag.answer(request.message, session_id=session_id)
+    payload["session_id"] = session_id
+    return payload
 
 
 @app.get("/chat/stream")
-def chat_stream(message: str = Query(..., min_length=1)) -> StreamingResponse:
-    def generator() -> Generator[str, None, None]:
+async def chat_stream(
+    message: str = Query(..., min_length=1),
+    session_id: Optional[str] = Query(default=None),
+) -> StreamingResponse:
+    resolved_session_id = session_id or uuid4().hex
+
+    async def generator() -> AsyncGenerator[str, None]:
+        yield sse_event(f"[SESSION]{resolved_session_id}")
         yield sse_event("[START]")
-        for token in rag.stream_answer(message):
+        async for token in rag.stream_answer(message, session_id=resolved_session_id):
             yield sse_event(token)
         yield sse_event("[END]")
 
     return StreamingResponse(generator(), media_type="text/event-stream")
 
 
+@app.get("/metrics")
+def metrics() -> Dict[str, object]:
+    return rag.get_runtime_metrics()
+
+
 @app.get("/evaluation", response_class=HTMLResponse)
 def evaluation() -> str:
-    return """
+    metrics = rag.get_runtime_metrics()
+    return f"""
 <!doctype html>
-<html lang="en">
+<html lang=\"en\">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Model Evaluation - NUST Chatbot</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=Poppins:wght@500;600;700;800&display=swap" rel="stylesheet" />
-  <style>
-    :root {
-      --bg: #f1e9e9;
-      --bg-accent: #e491c9;
-      --ink: #15173d;
-      --muted: #6f6480;
-      --panel: #f6f0f4;
-      --line: #d8c7d5;
-      --brand: #982598;
-      --brand-strong: #7f1f7f;
-      --shadow: 0 12px 30px rgba(21, 23, 61, 0.12);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Manrope", sans-serif;
-      color: var(--ink);
-      min-height: 100vh;
-      background:
-        radial-gradient(circle at 8% 8%, #f8c5e4 0%, transparent 35%),
-        radial-gradient(circle at 86% 14%, #d8b2df 0%, transparent 32%),
-        linear-gradient(180deg, var(--bg-accent) 0%, var(--bg) 62%);
-      display: grid;
-      place-items: center;
-      padding: 24px 14px;
-    }
-    .card {
-      width: min(760px, 100%);
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      box-shadow: var(--shadow);
-      padding: 20px;
-    }
-    h1 {
-      margin: 0 0 6px;
-      font-size: 28px;
-    }
-    .sub {
-      margin: 0 0 18px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-    .score {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      gap: 12px;
-      background: #ffffffa8;
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 14px;
-      margin-bottom: 14px;
-    }
-    .score strong {
-      font-size: 26px;
-      color: var(--brand-strong);
-    }
-    .grid {
-      display: grid;
-      gap: 12px;
-    }
-    .metric {
-      background: #ffffffa8;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 12px;
-    }
-    .row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 14px;
-      margin-bottom: 7px;
-    }
-    .bar {
-      height: 10px;
-      border-radius: 999px;
-      background: #eadde9;
-      overflow: hidden;
-    }
-    .fill {
-      height: 100%;
-      border-radius: 999px;
-      background: linear-gradient(90deg, var(--brand), var(--brand-strong));
-    }
-    .actions {
-      margin-top: 16px;
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    a {
-      text-decoration: none;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 14px;
-      color: var(--ink);
-      font-weight: 600;
-      background: #ffffffb8;
-    }
-    .primary {
-      background: var(--brand);
-      color: #fff;
-      border-color: transparent;
-    }
-  </style>
+  <meta charset=\"UTF-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+  <title>Runtime Evaluation</title>
 </head>
-<body>
-  <div class="card">
-    <h1>Model Evaluation</h1>
-    <p class="sub">Quick competition-readiness snapshot (demo metrics).</p>
-
-    <div class="score">
-      <div>
-        <div style="font-size:13px;color:var(--muted);">Accuracy Score</div>
-        <strong>78%</strong>
-      </div>
-      <div style="font-family:'IBM Plex Mono',monospace;color:var(--muted);font-size:12px;">Target: 75%+</div>
-    </div>
-
-    <div class="grid">
-      <div class="metric">
-        <div class="row"><span>Correct Answers</span><span>80%</span></div>
-        <div class="bar"><div class="fill" style="width:80%"></div></div>
-      </div>
-      <div class="metric">
-        <div class="row"><span>Response Clarity</span><span>85%</span></div>
-        <div class="bar"><div class="fill" style="width:85%"></div></div>
-      </div>
-      <div class="metric">
-        <div class="row"><span>Coverage of Queries</span><span>75%</span></div>
-        <div class="bar"><div class="fill" style="width:75%"></div></div>
-      </div>
-    </div>
-
-    <div class="actions">
-      <a class="primary" href="/">Back to Chatbot</a>
-      <a href="/health">Health Check</a>
+<body style=\"font-family:Manrope,sans-serif;background:#f6eff5;padding:20px;color:#1a1730;\">
+  <div style=\"max-width:760px;margin:0 auto;background:#fff;border:1px solid #dccedf;border-radius:16px;padding:18px;\">
+    <h1 style=\"margin:0 0 6px;\">Runtime Evaluation</h1>
+    <p style=\"margin:0 0 14px;color:#6f6480;\">Live metrics from this running server instance.</p>
+    <ul style=\"line-height:1.8;\">
+      <li>Handled Request Rate: <strong>{metrics['success_rate']}%</strong></li>
+      <li>Total Requests: <strong>{metrics['requests']}</strong></li>
+      <li>Direct FAQ Hits: <strong>{metrics['direct_hits']}</strong></li>
+      <li>Fallback FAQ Hits: <strong>{metrics['fallback_hits']}</strong></li>
+      <li>Blocked/Out-of-scope: <strong>{metrics['blocked']}</strong></li>
+      <li>Active Sessions: <strong>{metrics['active_sessions']}</strong></li>
+      <li>FAQ Entries / Terms: <strong>{metrics['faq_items']} / {metrics['faq_terms']}</strong></li>
+      <li>Answer Cache Entries: <strong>{metrics['answer_cache_entries']}</strong></li>
+    </ul>
+    <div style=\"display:flex;gap:10px;flex-wrap:wrap;\">
+      <a href=\"/\" style=\"text-decoration:none;padding:10px 12px;border-radius:10px;background:#982598;color:#fff;\">Back to Chatbot</a>
+      <a href=\"/health\" style=\"text-decoration:none;padding:10px 12px;border-radius:10px;border:1px solid #d8c7d5;color:#1a1730;\">Health Check</a>
+      <a href=\"/metrics\" style=\"text-decoration:none;padding:10px 12px;border-radius:10px;border:1px solid #d8c7d5;color:#1a1730;\">Raw Metrics JSON</a>
     </div>
   </div>
 </body>
@@ -227,7 +128,7 @@ def index() -> str:
   <title>NUST Admissions Copilot</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
       --bg: #f1e9e9;
@@ -316,6 +217,7 @@ def index() -> str:
       display: grid;
       place-items: center;
       padding: 16px;
+      touch-action: pan-y;
     }
 
     .home-screen {
@@ -330,7 +232,7 @@ def index() -> str:
 
     .welcome {
       width: min(700px, 100%);
-      min-height: min(760px, 55vh);
+      min-height: min(680px, 52vh);
       margin: 0 auto;
       border-radius: 26px;
       text-align: center;
@@ -338,8 +240,8 @@ def index() -> str:
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 18px;
-      padding: 28px;
+      gap: 14px;
+      padding: 24px;
       background: linear-gradient(180deg, var(--home-card-top), var(--home-card-bottom));
       border: 1px solid rgba(255, 255, 255, 0.26);
       box-shadow: 0 28px 68px rgba(24, 16, 42, 0.2);
@@ -388,7 +290,7 @@ def index() -> str:
       border: 1px solid rgba(255, 255, 255, 0.24);
       background: radial-gradient(circle at 30% 24%, #322f52 0%, #1f1d33 58%, #121321 100%);
       box-shadow: 0 18px 34px rgba(31, 17, 46, 0.34), 0 0 0 2px #6f7dff57, 0 0 0 7px #ff66c429;
-      animation: breathe 3s ease-in-out infinite;
+      animation: breathe 4.2s ease-in-out infinite;
       position: relative;
       isolation: isolate;
     }
@@ -412,11 +314,11 @@ def index() -> str:
 
     .welcome h1 {
       margin: 0;
-      font-family: "Sora", "Manrope", sans-serif;
-      font-size: clamp(44px, 9vw, 64px);
-      line-height: 0.95;
-      letter-spacing: -1.4px;
-      font-weight: 800;
+      font-family: "Outfit", "Manrope", sans-serif;
+      font-size: clamp(34px, 6.5vw, 46px);
+      line-height: 1.02;
+      letter-spacing: -0.7px;
+      font-weight: 700;
       background: linear-gradient(180deg, color-mix(in srgb, var(--home-title) 96%, #ffffff), color-mix(in srgb, var(--home-title) 76%, #6d62a2));
       -webkit-background-clip: text;
       background-clip: text;
@@ -429,11 +331,11 @@ def index() -> str:
     .welcome p {
       margin: 0;
       color: var(--home-sub);
-      font-size: clamp(18px, 3vw, 24px);
-      line-height: 1.35;
+      font-size: clamp(15px, 2.2vw, 18px);
+      line-height: 1.45;
       max-width: 520px;
       text-wrap: balance;
-      font-family: "Sora", "Manrope", sans-serif;
+      font-family: "Outfit", "Manrope", sans-serif;
       font-weight: 500;
       letter-spacing: -0.01em;
       transition: color 220ms ease;
@@ -488,6 +390,18 @@ def index() -> str:
       display: flex;
       align-items: center;
       gap: 8px;
+    }
+
+    .nav-btn {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--ink);
+      background: var(--panel);
+      cursor: pointer;
+      min-width: 0;
     }
 
     .eval-link {
@@ -605,7 +519,8 @@ def index() -> str:
       padding: 16px;
       white-space: pre-wrap;
       line-height: 1.58;
-      scroll-behavior: smooth;
+      scroll-behavior: auto;
+      overscroll-behavior: contain;
     }
 
     #chat::-webkit-scrollbar {
@@ -626,7 +541,7 @@ def index() -> str:
       max-width: 88%;
       font-size: 14px;
       box-shadow: 0 7px 16px rgba(16, 21, 32, 0.06);
-      transition: transform 170ms ease, box-shadow 180ms ease;
+      transition: transform 120ms ease, box-shadow 120ms ease;
     }
 
     .msg:hover {
@@ -752,7 +667,20 @@ def index() -> str:
       background: color-mix(in srgb, var(--bg-soft) 86%, transparent);
       position: sticky;
       bottom: 0;
-      backdrop-filter: blur(8px);
+      backdrop-filter: none;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .flow,
+      .panel,
+      .topbar,
+      .msg,
+      .avatar-shell,
+      .slide-hint,
+      .typing span {
+        animation: none !important;
+        transition: none !important;
+      }
     }
 
     input[type="text"] {
@@ -874,16 +802,16 @@ def index() -> str:
     @media (max-width: 520px) {
       .welcome {
         border-radius: 20px;
-        padding: 22px 16px;
-        min-height: min(650px, 92vh);
+        padding: 18px 14px;
+        min-height: min(560px, 86vh);
       }
 
       .welcome h1 {
-        font-size: clamp(40px, 12vw, 52px);
+        font-size: clamp(30px, 10vw, 38px);
       }
 
       .welcome p {
-        font-size: clamp(17px, 5.2vw, 20px);
+        font-size: clamp(14px, 4vw, 16px);
       }
 
       .avatar-shell {
@@ -943,11 +871,11 @@ def index() -> str:
               <circle cx="48" cy="15.5" r="4.2" fill="#FFE475"/>
             </svg>
           </div>
-          <h1>Chat Bot</h1>
-          <p>Get instant answers for NUST registration related questions.</p>
+          <h1>NUST Registration Copilot</h1>
+          <p>Get instant answers for NUST admissions, registration, and student services.</p>
         </div>
 
-        <div id="slideHint" class="slide-hint">⬆ Slide up to start chatting</div>
+        <div id="slideHint" class="slide-hint">Click or Slide Up to Start</div>
       </div>
     </section>
 
@@ -956,6 +884,7 @@ def index() -> str:
         <div class="topbar">
           <div class="brand">NUST Local RAG</div>
           <div class="top-actions">
+            <button id="backHome" class="nav-btn" type="button" style="display:none;">Home</button>
             <a class="eval-link" href="/evaluation">Model Evaluation</a>
             <button id="themeToggle" class="theme-toggle" aria-label="Toggle theme">
               <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -1007,12 +936,13 @@ def index() -> str:
     const status = document.getElementById("status");
     const errorBox = document.getElementById("error");
     const themeToggle = document.getElementById("themeToggle");
+    const backHomeBtn = document.getElementById("backHome");
+    const SESSION_STORAGE_KEY = "nust_chat_session_id";
     let activeController = null;
     let chatOpened = false;
     let transitionBusy = false;
     let introShown = false;
     let touchStartY = null;
-    let chatTouchStartY = null;
 
     function setTheme(theme) {
       document.body.setAttribute("data-theme", theme);
@@ -1035,7 +965,7 @@ def index() -> str:
     }
 
     function scrollToLatest() {
-      chat.scrollTo({ top: chat.scrollHeight, behavior: "smooth" });
+      chat.scrollTop = chat.scrollHeight;
     }
 
     function addMessage(cssClass, text, label = "") {
@@ -1127,8 +1057,17 @@ def index() -> str:
       setStatus("THINKING");
       const typingNode = addTypingIndicator();
 
+      const streamNode = document.createElement("div");
+      streamNode.className = "msg bot";
+      streamNode.innerHTML = `<div class="msg-head">NUST Assistant ${nowStamp()}</div><div class="msg-content"></div>`;
+      const streamBody = streamNode.querySelector(".msg-content");
+      let renderedAnswer = "";
+
       try {
-        const res = await fetch(`/chat/stream?message=${encodeURIComponent(question)}`, {
+        const sessionId = localStorage.getItem(SESSION_STORAGE_KEY) || "";
+        const streamUrl = `/chat/stream?message=${encodeURIComponent(question)}&session_id=${encodeURIComponent(sessionId)}`;
+
+        const res = await fetch(streamUrl, {
           method: "GET",
           signal
         });
@@ -1141,6 +1080,7 @@ def index() -> str:
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
         let full = "";
+        let streamStarted = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -1154,8 +1094,22 @@ def index() -> str:
             if (!evt.startsWith("data: ")) continue;
             const data = evt.slice(6);
 
+            if (data.startsWith("[SESSION]")) {
+              const incomingSessionId = data.slice("[SESSION]".length).trim();
+              if (incomingSessionId) {
+                localStorage.setItem(SESSION_STORAGE_KEY, incomingSessionId);
+              }
+              continue;
+            }
+
             if (data === "[START]") {
               setStatus("STREAMING");
+              if (!streamStarted) {
+                streamStarted = true;
+                typingNode.remove();
+                chat.appendChild(streamNode);
+                scrollToLatest();
+              }
               continue;
             }
             if (data === "[END]") {
@@ -1163,29 +1117,44 @@ def index() -> str:
             }
 
             full += data;
+            const parsedNow = extractAnswerAndSources(full);
+            renderedAnswer = parsedNow.answer;
+            if (window.marked) {
+              const rawHtml = marked.parse(renderedAnswer || "");
+              streamBody.innerHTML = window.DOMPurify ? DOMPurify.sanitize(rawHtml) : rawHtml;
+            } else {
+              streamBody.textContent = renderedAnswer;
+            }
             scrollToLatest();
           }
         }
 
-        typingNode.remove();
-        const parsed = extractAnswerAndSources(full);
-        const botNode = addMessage("bot", parsed.answer, "NUST Assistant");
-        addSources(botNode, parsed.sources);
-      } catch (streamErr) {
-        const fallback = await fetch("/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: question })
-        });
-        if (!fallback.ok) {
-          throw streamErr;
+        if (typingNode.isConnected) {
+          typingNode.remove();
         }
-        const payload = await fallback.json();
-        typingNode.remove();
-        const botNode = addMessage("bot", payload.answer || "No answer returned.", "NUST Assistant");
-        addSources(botNode, payload.sources || []);
-        setStatus(payload.status === "ok" ? "READY" : "CHECK INPUT");
-        return;
+        const parsed = extractAnswerAndSources(full);
+        if (streamNode.isConnected) {
+          if (streamBody) {
+            if (window.marked) {
+              const rawHtml = marked.parse(parsed.answer || "");
+              streamBody.innerHTML = window.DOMPurify ? DOMPurify.sanitize(rawHtml) : rawHtml;
+            } else {
+              streamBody.textContent = parsed.answer;
+            }
+          }
+          addSources(streamNode, parsed.sources);
+        } else {
+          const botNode = addMessage("bot", parsed.answer, "NUST Assistant");
+          addSources(botNode, parsed.sources);
+        }
+      } catch (streamErr) {
+        if (typingNode.isConnected) {
+          typingNode.remove();
+        }
+        if (streamNode.isConnected && !renderedAnswer.trim()) {
+          streamNode.remove();
+        }
+        throw streamErr;
       }
 
       setStatus("READY");
@@ -1236,6 +1205,9 @@ def index() -> str:
       transitionBusy = true;
       chatOpened = true;
       flow.classList.add("chat-open");
+      if (backHomeBtn) {
+        backHomeBtn.style.display = "inline-flex";
+      }
       setTimeout(() => {
         transitionBusy = false;
       }, 560);
@@ -1250,6 +1222,9 @@ def index() -> str:
       transitionBusy = true;
       chatOpened = false;
       flow.classList.remove("chat-open");
+      if (backHomeBtn) {
+        backHomeBtn.style.display = "none";
+      }
       setTimeout(() => {
         transitionBusy = false;
       }, 560);
@@ -1262,15 +1237,7 @@ def index() -> str:
       }
     }
 
-    function onChatWheel(event) {
-      if (!chatOpened || transitionBusy) return;
-      if (event.deltaY < -10 && chat.scrollTop <= 0) {
-        closeChatScreen();
-      }
-    }
-
     homeScreen.addEventListener("wheel", onWheel, { passive: true });
-    chatScreen.addEventListener("wheel", onChatWheel, { passive: true });
 
     homeScreen.addEventListener("touchstart", (event) => {
       const touch = event.changedTouches && event.changedTouches[0];
@@ -1288,34 +1255,22 @@ def index() -> str:
       touchStartY = null;
     }, { passive: true });
 
-    chatScreen.addEventListener("touchstart", (event) => {
-      const touch = event.changedTouches && event.changedTouches[0];
-      chatTouchStartY = touch ? touch.clientY : null;
-    }, { passive: true });
-
-    chatScreen.addEventListener("touchend", (event) => {
-      if (!chatOpened || chatTouchStartY === null || transitionBusy) return;
-      const touch = event.changedTouches && event.changedTouches[0];
-      if (!touch) return;
-      const delta = touch.clientY - chatTouchStartY;
-      if (delta > 40 && chat.scrollTop <= 0) {
-        closeChatScreen();
-      }
-      chatTouchStartY = null;
-    }, { passive: true });
-
     window.addEventListener("keydown", (event) => {
       if (!chatOpened && (event.key === "ArrowUp" || event.key === "Enter" || event.key === " ")) {
         openChatScreen();
         return;
       }
-      if (chatOpened && (event.key === "ArrowDown" || event.key === "Escape") && chat.scrollTop <= 0) {
+      if (chatOpened && (event.key === "ArrowDown" || event.key === "Escape")) {
         closeChatScreen();
       }
     });
 
     if (slideHint) {
       slideHint.addEventListener("click", openChatScreen);
+    }
+
+    if (backHomeBtn) {
+      backHomeBtn.addEventListener("click", closeChatScreen);
     }
 
     quickButtons.forEach((btn) => {

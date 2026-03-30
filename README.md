@@ -1,16 +1,16 @@
 # NUST Local RAG Chatbot
 
 ## Description
-This project is a local AI chatbot for NUST administration and student service queries. It uses retrieval-augmented generation with a local LLM runtime and a local vector index.
+This project is a local AI chatbot for NUST administration and student service queries. It is optimized for fast FAQ response time, Roman Urdu query handling, and live multi-turn chat sessions.
 
 ## Features
 - Domain-focused answering for NUST admin topics
 - Fast FAQ-style matching for common queries
-- Contextual reasoning over retrieved chunks for non-exact prompts
-- Basic Roman Urdu intent normalization for admission and fee questions
+- Roman Urdu intent normalization for admission and fee questions
+- Multi-turn session memory for follow-up questions (for example: "Can foreigners apply?" then "How?")
 - Markdown rendering in chatbot responses
 - Separate source metadata section under each answer
-- Static model evaluation page for demo presentation
+- Live runtime metrics endpoint and evaluation view
 - Light and dark mode UI toggle
 
 ## Tech Stack
@@ -68,12 +68,25 @@ http://127.0.0.1:8001
 ## How It Works
 1. Data is ingested from NUST FAQ pages and stored in SQLite plus HNSW index.
 2. On each query, the system tries fast FAQ matching first.
-3. If exact FAQ match is not enough, retrieval is performed from indexed chunks.
-4. The model generates a concise answer from retrieved context.
-5. Sources are shown separately as metadata.
+3. Roman Urdu queries are normalized into canonical intent text.
+4. Follow-up prompts are resolved against session history before matching.
+5. If exact FAQ match is not available, fallback FAQ matching is used.
+6. Sources are shown separately as metadata.
+
+## API Endpoints
+- `GET /health` : Service status
+- `POST /chat` : JSON request/response chat with session support
+- `GET /chat/stream` : SSE token stream with session support
+- `GET /metrics` : Live runtime counters (requests, hit rates, active sessions, cache)
+- `GET /evaluation` : UI view backed by live runtime metrics
+
+## Session Support
+- Each conversation can use a `session_id`.
+- The frontend stores `session_id` in browser local storage automatically.
+- Session memory is in-process and TTL-based (for demo/runtime usage).
 
 ## Limitations
-- The evaluation page is static and demo-only. It does not run real benchmark scoring.
+- Session memory is in-memory and resets when the process restarts.
 - Output quality depends on ingested data quality and coverage.
 - This is designed for NUST admin domain and refuses unrelated queries.
 
