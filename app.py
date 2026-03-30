@@ -940,10 +940,10 @@ def index() -> str:
           <div id="error" class="error"></div>
           <div class="hint-note">Off-topic questions are refused: I can only help with NUST administration topics.</div>
           <div class="quick-prompts">
-            <button class="quick" data-q="What is the registration process for new students at NUST?">Registration process for new students</button>
             <button class="quick" data-q="What documents are required for NUST registration?">Required registration documents</button>
-            <button class="quick" data-q="How can I check my fee challan and payment status?">Fee challan and payment status</button>
-            <button class="quick" data-q="When does semester course registration open?">Course registration opening dates</button>
+            <button class="quick" data-q="How can I submit the application processing fee (online) using 1Link option?">Application fee via 1Link</button>
+            <button class="quick" data-q="Can foreign students apply for admission at NSHS?">Foreign student admission (NSHS)</button>
+            <button class="quick" data-q="Does NUST offer scholarship / financial assistance?">Scholarship / financial assistance</button>
           </div>
         </div>
       </div>

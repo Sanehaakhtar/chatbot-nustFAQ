@@ -34,7 +34,7 @@ MAX_SESSION_TURNS = 6
 REFUSAL_MESSAGE = "I can only help with NUST administration topics."
 FAQ_MATCH_THRESHOLD = 0.62
 FAQ_DIRECT_MATCH_THRESHOLD = 0.68
-FAQ_FALLBACK_THRESHOLD = 0.45
+FAQ_FALLBACK_THRESHOLD = 0.52
 GREETING_MESSAGE = (
     "Hello! I can help with NUST admissions, fees, test schedules, hostels, and student services. "
     "Try asking: 'What is the eligibility criteria for UG admissions?'"
@@ -60,6 +60,19 @@ FOLLOW_UP_HINTS = {
     "iska",
     "that",
     "this",
+}
+
+FOLLOW_UP_PRONOUNS = {
+    "how",
+    "when",
+    "why",
+    "details",
+    "detail",
+    "process",
+    "steps",
+    "uska",
+    "iska",
+    "phir",
 }
 
 DOMAIN_TERMS = {
@@ -198,9 +211,16 @@ TOKEN_ALIASES = {
 ROMAN_URDU_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bek\s+se\s+(zyada|zada|zyaada).*(program|programme|course).*(apply|admission)"), "Can I apply for more than one programme at NUST?"),
     (re.compile(r"\b(registration|admission).*(document|dastavez|kagzaat)"), "What documents are required for NUST registration?"),
-    (re.compile(r"\bfee\s+challan.*(status|check|payment)"), "How can I check my fee challan and payment status?"),
+    (re.compile(r"\bfee\s+challan.*(status|check|payment)"), "How can I submit the application processing fee (online) using 1Link option?"),
     (re.compile(r"\b(course|semester).*(registration).*(kab|when|open)"), "When does semester course registration open?"),
     (re.compile(r"\b(eligibility|eligible|criteria).*(ug|undergraduate|admission)"), "What is the eligibility criteria for UG admissions?"),
+]
+
+ENGLISH_INTENT_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"\b(fee\s+challan|challan|payment\s+status|fee\s+status|processing\s+fee)\b", flags=re.IGNORECASE),
+        "How can I submit the application processing fee (online) using 1Link option?",
+    ),
 ]
 
 # Global caches to avoid reloading index/db per request
@@ -263,6 +283,11 @@ def rewrite_roman_urdu_question(question: str) -> str:
     for pattern, replacement in ROMAN_URDU_PATTERNS:
         if pattern.search(normalized):
             return replacement
+
+    for pattern, replacement in ENGLISH_INTENT_PATTERNS:
+        if pattern.search(question):
+            return replacement
+
     return question
 
 
@@ -547,11 +572,20 @@ class NustRAG:
         tokens = re.findall(r"[a-zA-Z0-9]+", question.lower())
         if not tokens:
             return False
-        if len(tokens) > 6:
+
+        # Do not rewrite clearly self-contained domain questions.
+        if has_domain_terms(question) and len(tokens) > 2:
             return False
-        if tokens[0] in FOLLOW_UP_HINTS:
+
+        # Very short prompts can be follow-ups.
+        if len(tokens) <= 2 and any(token in FOLLOW_UP_HINTS for token in tokens):
             return True
-        return any(token in FOLLOW_UP_HINTS for token in tokens)
+
+        # Slightly longer prompts must start like a follow-up.
+        if len(tokens) <= 4 and tokens[0] in FOLLOW_UP_PRONOUNS:
+            return True
+
+        return False
 
     def _resolve_follow_up(self, question: str, session_id: Optional[str]) -> str:
         turns = self._get_or_create_session(session_id)
@@ -762,6 +796,11 @@ class NustRAG:
             overlap = len(query_terms & faq_terms)
             overlap_ratio = overlap / max(1, len(query_terms))
 
+            if overlap == 0:
+                continue
+            if len(query_terms) >= 3 and overlap_ratio < 0.40:
+                continue
+
             score = (0.30 * ratio) + (0.70 * overlap_ratio)
             if overlap_ratio >= 0.5:
                 score += 0.08
@@ -776,6 +815,49 @@ class NustRAG:
             return None
 
         return best_item["answer"], [self._format_faq_source(best_item)]
+
+    def _suggest_faq_questions(self, question: str, limit: int = 3) -> List[str]:
+        if not self.faq_cache:
+            return []
+
+        q_norm = question.strip().lower()
+        query_terms = tokenize_query_terms(question)
+        scored: List[Tuple[float, str]] = []
+        for item in self.faq_cache:
+            faq_question = item["question"]
+            faq_terms = tokenize_query_terms(faq_question)
+            overlap = len(query_terms & faq_terms)
+            if len(query_terms) >= 2 and overlap == 0:
+                continue
+            overlap_ratio = overlap / max(1, len(query_terms))
+            ratio = difflib.SequenceMatcher(None, q_norm, faq_question.lower()).ratio()
+            score = (0.25 * ratio) + (0.75 * overlap_ratio)
+
+            if {"admission"} & query_terms and {"admission"} & faq_terms:
+                score += 0.10
+
+            scored.append((score, faq_question))
+
+        if not scored:
+            # If query terms are too sparse, fall back to lexical similarity only.
+            for item in self.faq_cache:
+                faq_question = item["question"]
+                ratio = difflib.SequenceMatcher(None, q_norm, faq_question.lower()).ratio()
+                scored.append((ratio, faq_question))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        suggestions: List[str] = []
+        seen: set[str] = set()
+        for _score, faq_question in scored:
+            key = faq_question.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            suggestions.append(faq_question)
+            if len(suggestions) >= limit:
+                break
+
+        return suggestions
 
     async def precheck(self, question: str) -> Optional[str]:
         if not question.strip():
@@ -842,7 +924,14 @@ class NustRAG:
             }
 
         self.stats["blocked"] += 1
-        fallback_message = "I could not find a close FAQ match. Please rephrase your question using FAQ terms."
+        suggestions = self._suggest_faq_questions(match_question, limit=3)
+        fallback_message = "I could not find an exact FAQ match."
+        if suggestions:
+            fallback_message += " Try one of these:\n" + "\n".join(
+                [f"{idx}. {q}" for idx, q in enumerate(suggestions, start=1)]
+            )
+        else:
+            fallback_message += " Please rephrase your question using FAQ terms."
         self._record_turn(session_id, question, fallback_message)
         return {
             "answer": fallback_message,
@@ -889,6 +978,13 @@ class NustRAG:
             return
 
         self.stats["blocked"] += 1
-        fallback_message = "I could not find a close FAQ match. Please rephrase your question using FAQ terms."
+        suggestions = self._suggest_faq_questions(match_question, limit=3)
+        fallback_message = "I could not find an exact FAQ match."
+        if suggestions:
+            fallback_message += " Try one of these:\n" + "\n".join(
+                [f"{idx}. {q}" for idx, q in enumerate(suggestions, start=1)]
+            )
+        else:
+            fallback_message += " Please rephrase your question using FAQ terms."
         self._record_turn(session_id, question, fallback_message)
         yield fallback_message
