@@ -360,6 +360,16 @@ def index() -> str:
       width: min(700px, 100%);
       display: grid;
       gap: 12px;
+      max-height: calc(100vh - 32px);
+      align-content: start;
+    }
+
+    #chatScreen {
+      align-items: start;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding-top: 12px;
+      padding-bottom: 12px;
     }
 
     .topbar {
@@ -367,6 +377,12 @@ def index() -> str:
       align-items: center;
       justify-content: space-between;
       gap: 10px;
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      padding: 4px 2px;
+      background: color-mix(in srgb, var(--bg) 80%, transparent);
+      backdrop-filter: blur(6px);
       opacity: 0;
       animation: rise 420ms ease-out 120ms forwards;
     }
@@ -390,6 +406,8 @@ def index() -> str:
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     .nav-btn {
@@ -470,7 +488,8 @@ def index() -> str:
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      min-height: min(78vh, 760px);
+      height: min(78vh, 760px);
+      min-height: 540px;
       position: relative;
       opacity: 0;
       animation: rise 620ms ease-out 180ms forwards;
@@ -824,8 +843,18 @@ def index() -> str:
         height: 76px;
       }
 
+      #chatScreen {
+        padding-top: 8px;
+        padding-bottom: 8px;
+      }
+
       .panel {
-        min-height: 76vh;
+        height: 78vh;
+        min-height: 0;
+      }
+
+      .topbar {
+        top: 0;
       }
 
       .composer {
@@ -943,6 +972,8 @@ def index() -> str:
     let transitionBusy = false;
     let introShown = false;
     let touchStartY = null;
+    let autoScrollPinned = true;
+    let scrollFrame = null;
 
     function setTheme(theme) {
       document.body.setAttribute("data-theme", theme);
@@ -964,8 +995,22 @@ def index() -> str:
       status.textContent = text;
     }
 
-    function scrollToLatest() {
-      chat.scrollTop = chat.scrollHeight;
+    function isNearBottom() {
+      const threshold = 80;
+      return (chat.scrollHeight - chat.scrollTop - chat.clientHeight) <= threshold;
+    }
+
+    chat.addEventListener("scroll", () => {
+      autoScrollPinned = isNearBottom();
+    }, { passive: true });
+
+    function scrollToLatest(force = false) {
+      if (!force && !autoScrollPinned) return;
+      if (scrollFrame) return;
+      scrollFrame = requestAnimationFrame(() => {
+        chat.scrollTop = chat.scrollHeight;
+        scrollFrame = null;
+      });
     }
 
     function addMessage(cssClass, text, label = "") {
@@ -1008,7 +1053,7 @@ def index() -> str:
       node.appendChild(body);
 
       chat.appendChild(node);
-      scrollToLatest();
+      scrollToLatest(true);
       return node;
     }
 
@@ -1027,7 +1072,7 @@ def index() -> str:
       node.appendChild(dots);
 
       chat.appendChild(node);
-      scrollToLatest();
+      scrollToLatest(true);
       return node;
     }
 
@@ -1062,6 +1107,21 @@ def index() -> str:
       streamNode.innerHTML = `<div class="msg-head">NUST Assistant ${nowStamp()}</div><div class="msg-content"></div>`;
       const streamBody = streamNode.querySelector(".msg-content");
       let renderedAnswer = "";
+      let full = "";
+      let renderFrame = null;
+
+      const renderStreamContent = () => {
+        renderFrame = null;
+        const parsedNow = extractAnswerAndSources(full);
+        renderedAnswer = parsedNow.answer;
+        if (window.marked) {
+          const rawHtml = marked.parse(renderedAnswer || "");
+          streamBody.innerHTML = window.DOMPurify ? DOMPurify.sanitize(rawHtml) : rawHtml;
+        } else {
+          streamBody.textContent = renderedAnswer;
+        }
+        scrollToLatest();
+      };
 
       try {
         const sessionId = localStorage.getItem(SESSION_STORAGE_KEY) || "";
@@ -1079,7 +1139,6 @@ def index() -> str:
         const reader = res.body.getReader();
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
-        let full = "";
         let streamStarted = false;
 
         while (true) {
@@ -1108,7 +1167,7 @@ def index() -> str:
                 streamStarted = true;
                 typingNode.remove();
                 chat.appendChild(streamNode);
-                scrollToLatest();
+                scrollToLatest(true);
               }
               continue;
             }
@@ -1117,16 +1176,15 @@ def index() -> str:
             }
 
             full += data;
-            const parsedNow = extractAnswerAndSources(full);
-            renderedAnswer = parsedNow.answer;
-            if (window.marked) {
-              const rawHtml = marked.parse(renderedAnswer || "");
-              streamBody.innerHTML = window.DOMPurify ? DOMPurify.sanitize(rawHtml) : rawHtml;
-            } else {
-              streamBody.textContent = renderedAnswer;
+            if (!renderFrame) {
+              renderFrame = requestAnimationFrame(renderStreamContent);
             }
-            scrollToLatest();
           }
+        }
+
+        if (renderFrame) {
+          cancelAnimationFrame(renderFrame);
+          renderStreamContent();
         }
 
         if (typingNode.isConnected) {
