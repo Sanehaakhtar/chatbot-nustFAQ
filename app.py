@@ -91,27 +91,222 @@ def evaluation() -> str:
   <meta charset=\"UTF-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
   <title>Runtime Evaluation</title>
+  <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\" />
+  <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin />
+  <link href=\"https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap\" rel=\"stylesheet\" />
+  <style>
+    :root {{
+      --bg: #f6f1f7;
+      --card: #ffffff;
+      --ink: #1d1930;
+      --muted: #6b6083;
+      --line: #e2d5ea;
+      --brand: #8f2d9d;
+      --ok: #237a47;
+      --warn: #a3542f;
+      --shadow: 0 14px 32px rgba(22, 16, 40, 0.11);
+    }}
+
+    * {{ box-sizing: border-box; }}
+
+    body {{
+      margin: 0;
+      font-family: "Manrope", sans-serif;
+      background:
+        radial-gradient(circle at 10% 0%, #f5dffb 0%, transparent 45%),
+        radial-gradient(circle at 90% 0%, #e6dcff 0%, transparent 40%),
+        var(--bg);
+      color: var(--ink);
+      padding: 24px;
+    }}
+
+    .wrap {{
+      max-width: 980px;
+      margin: 0 auto;
+      display: grid;
+      gap: 14px;
+    }}
+
+    .hero {{
+      background: linear-gradient(135deg, #ffffff, #f8edff);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }}
+
+    .hero h1 {{
+      margin: 0;
+      font-size: clamp(24px, 4vw, 33px);
+      letter-spacing: -0.02em;
+    }}
+
+    .hero p {{
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }}
+
+    .kpis {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }}
+
+    .kpi {{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+      padding: 12px;
+      box-shadow: 0 8px 18px rgba(22, 16, 40, 0.07);
+    }}
+
+    .kpi .label {{
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }}
+
+    .kpi .value {{
+      font-size: 27px;
+      font-weight: 800;
+      line-height: 1;
+      color: var(--ink);
+    }}
+
+    .panel {{
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--card);
+      padding: 14px;
+      box-shadow: var(--shadow);
+    }}
+
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+
+    th, td {{
+      padding: 11px 10px;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+      text-align: left;
+      font-size: 14px;
+    }}
+
+    th {{
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }}
+
+    .hint {{
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.5;
+      display: grid;
+      gap: 4px;
+    }}
+
+    .hint strong {{
+      color: var(--ink);
+    }}
+
+    .actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }}
+
+    .btn {{
+      text-decoration: none;
+      border-radius: 12px;
+      padding: 10px 13px;
+      border: 1px solid var(--line);
+      color: var(--ink);
+      font-weight: 700;
+      background: #fff;
+    }}
+
+    .btn.primary {{
+      border-color: transparent;
+      background: var(--brand);
+      color: #fff;
+    }}
+
+    @media (max-width: 860px) {{
+      .kpis {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
+    }}
+
+    @media (max-width: 520px) {{
+      body {{ padding: 14px; }}
+      .kpis {{ grid-template-columns: 1fr; }}
+      .kpi .value {{ font-size: 24px; }}
+    }}
+  </style>
 </head>
-<body style=\"font-family:Manrope,sans-serif;background:#f6eff5;padding:20px;color:#1a1730;\">
-  <div style=\"max-width:760px;margin:0 auto;background:#fff;border:1px solid #dccedf;border-radius:16px;padding:18px;\">
-    <h1 style=\"margin:0 0 6px;\">Runtime Evaluation</h1>
-    <p style=\"margin:0 0 14px;color:#6f6480;\">Live metrics from this running server instance.</p>
-    <ul style=\"line-height:1.8;\">
-      <li>Handled Request Rate: <strong>{metrics['success_rate']}%</strong></li>
-      <li>Total Requests: <strong>{metrics['requests']}</strong></li>
-      <li>Direct FAQ Hits: <strong>{metrics['direct_hits']}</strong></li>
-      <li>Fallback FAQ Hits: <strong>{metrics['fallback_hits']}</strong></li>
-      <li>Blocked/Out-of-scope: <strong>{metrics['blocked']}</strong></li>
-      <li>Active Sessions: <strong>{metrics['active_sessions']}</strong></li>
-      <li>FAQ Entries / Terms: <strong>{metrics['faq_items']} / {metrics['faq_terms']}</strong></li>
-      <li>Answer Cache Entries: <strong>{metrics['answer_cache_entries']}</strong></li>
-    </ul>
-    <div style=\"display:flex;gap:10px;flex-wrap:wrap;\">
-      <a href=\"/\" style=\"text-decoration:none;padding:10px 12px;border-radius:10px;background:#982598;color:#fff;\">Back to Chatbot</a>
-      <a href=\"/health\" style=\"text-decoration:none;padding:10px 12px;border-radius:10px;border:1px solid #d8c7d5;color:#1a1730;\">Health Check</a>
-      <a href=\"/metrics\" style=\"text-decoration:none;padding:10px 12px;border-radius:10px;border:1px solid #d8c7d5;color:#1a1730;\">Raw Metrics JSON</a>
-    </div>
-  </div>
+<body>
+  <main class=\"wrap\">
+    <section class=\"hero\">
+      <h1>Runtime Evaluation Dashboard</h1>
+      <p>Live system health for your current model session. Use this page to verify answer quality trends and operational stability before demos.</p>
+    </section>
+
+    <section class=\"kpis\">
+      <article class=\"kpi\">
+        <div class=\"label\">Success Rate</div>
+        <div class=\"value\">{metrics['success_rate']}%</div>
+      </article>
+      <article class=\"kpi\">
+        <div class=\"label\">Total Requests</div>
+        <div class=\"value\">{metrics['requests']}</div>
+      </article>
+      <article class=\"kpi\">
+        <div class=\"label\">Direct FAQ Hits</div>
+        <div class=\"value\">{metrics['direct_hits']}</div>
+      </article>
+      <article class=\"kpi\">
+        <div class=\"label\">Fallback Hits</div>
+        <div class=\"value\">{metrics['fallback_hits']}</div>
+      </article>
+    </section>
+
+    <section class=\"panel\">
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Value</th>
+            <th>What It Means</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Blocked Queries</td><td>{metrics['blocked']}</td><td>Out-of-scope questions refused by policy filter.</td></tr>
+          <tr><td>Active Sessions</td><td>{metrics['active_sessions']}</td><td>Concurrent conversation threads currently tracked.</td></tr>
+          <tr><td>FAQ Coverage</td><td>{metrics['faq_items']} entries / {metrics['faq_terms']} terms</td><td>Indexed FAQ inventory available for retrieval.</td></tr>
+          <tr><td>Answer Cache</td><td>{metrics['answer_cache_entries']}</td><td>Cached responses for repeated intent patterns.</td></tr>
+        </tbody>
+      </table>
+
+      <div class=\"hint\">
+        <div><strong>How to read quickly:</strong> higher direct hits usually means better intent matching.</div>
+        <div><strong>If fallback rises:</strong> refine synonyms or Roman Urdu rewrite patterns.</div>
+        <div><strong>If blocked rises:</strong> users are asking outside NUST administration scope.</div>
+      </div>
+    </section>
+
+    <section class=\"actions\">
+      <a class=\"btn primary\" href=\"/\">Back to Chatbot</a>
+      <a class=\"btn\" href=\"/health\">Health Check</a>
+      <a class=\"btn\" href=\"/metrics\">Raw Metrics JSON</a>
+    </section>
+  </main>
 </body>
 </html>
     """
@@ -366,10 +561,16 @@ def index() -> str:
 
     #chatScreen {
       align-items: start;
-      overflow-y: auto;
+      overflow-y: hidden;
       overscroll-behavior: contain;
       padding-top: 12px;
       padding-bottom: 12px;
+    }
+
+    @media (max-height: 720px) {
+      #chatScreen {
+        overflow-y: auto;
+      }
     }
 
     .topbar {
@@ -383,7 +584,7 @@ def index() -> str:
       padding: 4px 2px;
       background: color-mix(in srgb, var(--bg) 80%, transparent);
       backdrop-filter: blur(6px);
-      opacity: 0;
+      opacity: 1;
       animation: rise 420ms ease-out 120ms forwards;
     }
 
@@ -491,7 +692,7 @@ def index() -> str:
       height: min(78vh, 760px);
       min-height: 540px;
       position: relative;
-      opacity: 0;
+      opacity: 1;
       animation: rise 620ms ease-out 180ms forwards;
     }
 
@@ -699,6 +900,11 @@ def index() -> str:
       .typing span {
         animation: none !important;
         transition: none !important;
+      }
+
+      .panel,
+      .topbar {
+        opacity: 1 !important;
       }
     }
 
@@ -1262,6 +1468,7 @@ def index() -> str:
       if (chatOpened || transitionBusy) return;
       transitionBusy = true;
       chatOpened = true;
+      chatScreen.scrollTop = 0;
       flow.classList.add("chat-open");
       if (backHomeBtn) {
         backHomeBtn.style.display = "inline-flex";
@@ -1280,6 +1487,7 @@ def index() -> str:
       transitionBusy = true;
       chatOpened = false;
       flow.classList.remove("chat-open");
+      chatScreen.scrollTop = 0;
       if (backHomeBtn) {
         backHomeBtn.style.display = "none";
       }

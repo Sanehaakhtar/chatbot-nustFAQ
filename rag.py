@@ -146,6 +146,22 @@ STOPWORDS = {
     "who",
     "why",
     "with",
+    "kya",
+    "hai",
+    "hain",
+    "tha",
+    "thi",
+    "the",
+    "ke",
+    "ki",
+    "ka",
+    "ko",
+    "se",
+    "me",
+    "mein",
+    "main",
+    "liye",
+    "liay",
 }
 
 TOKEN_ALIASES = {
@@ -167,6 +183,7 @@ TOKEN_ALIASES = {
     "eligible": "eligibility",
     "eligibility": "eligibility",
     "admissions": "admission",
+    "registrations": "registration",
     "kab": "when",
     "khulenge": "open",
     "khule": "open",
@@ -189,6 +206,8 @@ TOKEN_ALIASES = {
     "programme": "programme",
     "programmes": "programme",
     "krskte": "can",
+    "karsakte": "can",
+    "krsakte": "can",
     "kar": "do",
     "sakte": "can",
     "sakta": "can",
@@ -200,6 +219,13 @@ TOKEN_ALIASES = {
     "dastavez": "document",
     "kagzaat": "document",
     "kaagzaat": "document",
+    "chahiye": "required",
+    "chaahiye": "required",
+    "milti": "offer",
+    "milta": "offer",
+    "milty": "offer",
+    "scholarships": "scholarship",
+    "financials": "financial",
     "kab": "when",
     "karna": "process",
     "karen": "process",
@@ -210,10 +236,13 @@ TOKEN_ALIASES = {
 
 ROMAN_URDU_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bek\s+se\s+(zyada|zada|zyaada).*(program|programme|course).*(apply|admission)"), "Can I apply for more than one programme at NUST?"),
-    (re.compile(r"\b(registration|admission).*(document|dastavez|kagzaat)"), "What documents are required for NUST registration?"),
+    (re.compile(r"\b(registration|admission).*(document|dastavez|kagzaat|kaagzaat)"), "What documents are essentially required to be submitted while applying for admission?"),
+    (re.compile(r"\b(document|documents|dastavez|kagzaat|kaagzaat).*(registration|admission|apply)"), "What documents are essentially required to be submitted while applying for admission?"),
     (re.compile(r"\bfee\s+challan.*(status|check|payment)"), "How can I submit the application processing fee (online) using 1Link option?"),
     (re.compile(r"\b(course|semester).*(registration).*(kab|when|open)"), "When does semester course registration open?"),
     (re.compile(r"\b(eligibility|eligible|criteria).*(ug|undergraduate|admission)"), "What is the eligibility criteria for UG admissions?"),
+    (re.compile(r"\b(scholarship|financial|assistance).*(milti|milta|available|offer|deti|deta)"), "Does NUST offer scholarship / financial assistance?"),
+    (re.compile(r"\b(milti|milta|available|offer|deti|deta).*(scholarship|financial|assistance)"), "Does NUST offer scholarship / financial assistance?"),
 ]
 
 ENGLISH_INTENT_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
